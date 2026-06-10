@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local WMS credentials/session state
+.env
+.wms_token_cache.json
+wms_storage_state.json
+
+# Runtime data
+logs/
+output/
+pdf_downloads/
+downloads/
+samples/**/*.pdf
+samples/**/*.PDF
+6-8/
+20*/
+*.pdf
+*.csv
+*.xlsx
+*.jsonl
+*.zip
+
+# Build outputs
+build*/
+dist*/
+*.spec~
+
+# Local archives and unrelated experiments
+_unrelated_files/
+WMS_PDF_Tool/
+WMS_PDF_Tool_core/
+.codex_deps/
+tmp/
+PDF_DDD_clean*/
+PDF_DDD_upload*/

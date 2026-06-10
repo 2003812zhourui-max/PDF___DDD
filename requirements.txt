@@ -1,0 +1,10 @@
+PyMuPDF
+openpyxl
+zxing-cpp
+Pillow
+requests
+curl_cffi
+pypdf
+playwright
+pyinstaller
+pytesseract
