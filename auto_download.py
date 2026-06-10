@@ -427,6 +427,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=1000)
     p.add_argument("--workers", type=int, default=5)
     p.add_argument("--pdf-dir", default=str(PDF_DIR))
+    p.add_argument("--log-file", default=str(LOG_FILE))
     p.add_argument("--channel", default="", help="物流渠道筛选，例如 TikTok-CBT-US、Upload_Shipping_Label-Speedx")
     p.add_argument("--force", action="store_true")
     return p.parse_args()
@@ -513,8 +514,9 @@ def main() -> None:
     args = parse_args()
 
     PDF_DIR = Path(args.pdf_dir)
+    LOG_FILE = Path(args.log_file)
     PDF_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     if args.start_time and args.end_time:
         start_time, end_time = args.start_time, args.end_time
@@ -524,10 +526,14 @@ def main() -> None:
         start_time, end_time = yesterday_range()
 
     wh_codes = [c.strip() for c in args.wh_codes.split(",") if c.strip()]
+    status_values = [s.strip() for s in args.status.split(",") if s.strip()]
+    if not status_values:
+        status_values = ["15"]
     success_set = load_success_set()
 
     log(f"时间: {start_time} ~ {end_time}")
     log(f"仓库: {wh_codes}")
+    log(f"状态: {status_values}")
     log(f"并发: {args.workers}")
     if args.channel:
         log(f"物流渠道: {args.channel}")
@@ -550,32 +556,33 @@ def main() -> None:
     all_orders: list[tuple[str, dict[str, str]]] = []
     for wh_code in wh_codes:
         session.headers["whcode"] = wh_code
-        log(f"获取 {wh_code} 订单...")
-        for page in range(1, args.max_pages + 1):
-            payload = {
-                "appendixFlag": "", "areaCodes": [], "categoryIdList": [], "cellNos": [],
-                "codeType": "barcode", "countKind": "orderWeight", "countryRegionCodes": "",
-                "current": page, "customerCodes": "", "endTime": end_time,
-                "expressFlag": "", "expressPrintStatus": "", "forecastStatus": "",
-                "logisticsCarrier": "", "logisticsChannel": args.channel, "orderCount": "",
-                "orderNoType": "sourceNo", "orderSourceList": [], "productPackType": "",
-                "receiver": "", "relatedReturnOrder": "", "salesPlatform": "",
-                "size": args.size, "skuQtyStrList": [], "sourceNoLists": [],
-                "startTime": start_time, "status": args.status, "timeType": "createTime",
-                "unitMark": 0, "varietyType": "", "weightCountEnd": "",
-                "weightCountStart": "", "whCode": wh_code, "withVas": "",
-            }
-            data = _fetch_json(session, auth_values, LIST_API, method="POST", payload=payload)
-            records = data.get("data", {}).get("records", []) if isinstance(data.get("data"), dict) else []
-            if not records:
-                break
-            for r in records:
-                o = normalize_order(r)
-                if o["deliveryNo"]:
-                    all_orders.append((wh_code, o))
-            log(f"  page={page}: {len(records)} 条")
-            if len(records) < args.size:
-                break
+        for status in status_values:
+            log(f"获取 {wh_code} 状态 {status} 订单...")
+            for page in range(1, args.max_pages + 1):
+                payload = {
+                    "appendixFlag": "", "areaCodes": [], "categoryIdList": [], "cellNos": [],
+                    "codeType": "barcode", "countKind": "orderWeight", "countryRegionCodes": "",
+                    "current": page, "customerCodes": "", "endTime": end_time,
+                    "expressFlag": "", "expressPrintStatus": "", "forecastStatus": "",
+                    "logisticsCarrier": "", "logisticsChannel": args.channel, "orderCount": "",
+                    "orderNoType": "sourceNo", "orderSourceList": [], "productPackType": "",
+                    "receiver": "", "relatedReturnOrder": "", "salesPlatform": "",
+                    "size": args.size, "skuQtyStrList": [], "sourceNoLists": [],
+                    "startTime": start_time, "status": status, "timeType": "createTime",
+                    "unitMark": 0, "varietyType": "", "weightCountEnd": "",
+                    "weightCountStart": "", "whCode": wh_code, "withVas": "",
+                }
+                data = _fetch_json(session, auth_values, LIST_API, method="POST", payload=payload)
+                records = data.get("data", {}).get("records", []) if isinstance(data.get("data"), dict) else []
+                if not records:
+                    break
+                for r in records:
+                    o = normalize_order(r)
+                    if o["deliveryNo"]:
+                        all_orders.append((wh_code, o))
+                log(f"  status={status} page={page}: {len(records)} 条")
+                if len(records) < args.size:
+                    break
 
     # 过滤
     seen = set()

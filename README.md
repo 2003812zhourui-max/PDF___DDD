@@ -41,6 +41,13 @@ $env:WMS_PASSWORD="你的WMS密码"
 python main.py --start-time "2026-06-10 00:00:00" --end-time "2026-06-10 23:59:59" --wh-codes US02 --statuses 15 --workers 5 --limit 200 --output-name download_200_check
 ```
 
+每次强制重新下载、重新识别，并输出到全新文件夹：
+
+```powershell
+$run = "run_0611_0000_0100_" + (Get-Date -Format "yyyyMMdd_HHmmss")
+python main.py --start-time "2026-06-11 00:00:00" --end-time "2026-06-11 01:00:00" --wh-codes US02 --statuses "10,15,20,30" --workers 5 --force --output-name $run --output-dir "output\pdf\$run"
+```
+
 只识别本地已有 PDF：
 
 ```powershell

@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--channel", default="", help="物流渠道筛选，例如 TikTok-CBT-US、Upload_Shipping_Label-Speedx")
     parser.add_argument("--metadata", default="", help="metadata.jsonl 路径，默认自动检测 output/download_label_metadata.jsonl")
     parser.add_argument("--browser-mode", action="store_true", help="使用旧浏览器模式下载（需要 Playwright）")
+    parser.add_argument("--force", action="store_true", help="强制重新下载，不跳过下载日志里已有成功记录")
     return parser.parse_args()
 
 

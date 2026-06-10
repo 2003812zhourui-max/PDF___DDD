@@ -62,7 +62,7 @@ def run_download_http(args) -> DownloadResult:
     input_dir = Path(args.input_dir).expanduser().resolve() if args.input_dir else default_batch_dir(args).resolve()
     input_dir.mkdir(parents=True, exist_ok=True)
     DEFAULT_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    download_log = DEFAULT_LOG_DIR / "download_log.csv"
+    download_log = resolve_download_log(args, input_dir)
 
     username = getattr(args, "username", "") or os.environ.get("WMS_USERNAME", "")
     password = getattr(args, "password", "") or os.environ.get("WMS_PASSWORD", "")
@@ -76,6 +76,7 @@ def run_download_http(args) -> DownloadResult:
         "--username", username,
         "--password", password,
         "--pdf-dir", str(input_dir),
+        "--log-file", str(download_log),
         "--workers", str(workers),
     ]
     if args.start_time and args.end_time:
@@ -90,6 +91,8 @@ def run_download_http(args) -> DownloadResult:
         downloader_args.extend(["--limit", str(args.limit)])
     if getattr(args, "channel", ""):
         downloader_args.extend(["--channel", args.channel])
+    if getattr(args, "force", False):
+        downloader_args.append("--force")
 
     log(f"开始 HTTP 并发下载 PDF 面单，保存目录: {input_dir}")
     log(f"并发线程: {workers}")
@@ -151,6 +154,8 @@ def run_download_browser(args) -> DownloadResult:
         downloader_args.extend(["--total-limit", str(args.limit)])
     if getattr(args, "channel", ""):
         downloader_args.extend(["--channel", args.channel])
+    if getattr(args, "force", False):
+        downloader_args.append("--force")
     if args.debug:
         downloader_args.append("--browser-mode")
 
