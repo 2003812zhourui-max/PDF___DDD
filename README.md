@@ -118,6 +118,40 @@ powershell -ExecutionPolicy Bypass -File scripts\register_hourly_batches_task.ps
 Start-ScheduledTask -TaskName "PDF_DDD hourly batches"
 ```
 
+## 每天按小时定时跑上一小时
+
+如果你要每天滚动执行：凌晨 1 点跑 `00:00:00 ~ 00:59:59`，凌晨 2 点跑 `01:00:00 ~ 01:59:59`，一直跑到晚上 22 点，可以注册这个任务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register_previous_hour_task.ps1 -StartAt "01:00" -EndAt "22:30" -WhCodes US02 -Statuses "10,15,20,30" -Workers 5
+```
+
+先预演会注册哪些触发点，不真正注册：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register_previous_hour_task.ps1 -StartAt "01:00" -EndAt "22:30" -DryRun
+```
+
+它会注册每天这些触发时间：
+
+```text
+01:00, 02:00, 03:00, ..., 22:00
+```
+
+每次触发时只跑上一小时，并且强制重新下载、重新识别，输出独立目录。例如：
+
+```text
+01:00 -> 2026-06-11 00:00:00 ~ 2026-06-11 00:59:59
+02:00 -> 2026-06-11 01:00:00 ~ 2026-06-11 01:59:59
+22:00 -> 2026-06-11 21:00:00 ~ 2026-06-11 21:59:59
+```
+
+手动测试“上一小时”脚本，不真正下载：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_previous_hour_batch.ps1 -RunAt "2026-06-11 01:00:00" -DryRun
+```
+
 ## 当前识别规则
 
 面单类型只重点识别三类：
