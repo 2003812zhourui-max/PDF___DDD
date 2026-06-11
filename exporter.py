@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -20,6 +20,8 @@ from utils import ensure_dir, log
 METADATA_JSONL = BASE_DIR / "output" / "download_label_metadata.jsonl"
 UNKNOWN = "UNKNOWN"
 NORMAL_LABEL_TEMPLATE = "普通面单"
+BRIEF_SHEET_NAME = "简略版"
+BRIEF_COLUMNS = ("追踪号", "承运商", "最终状态", "条码是否一致")
 
 REVIEW_STATUSES = {
     "review_conflict",
@@ -520,11 +522,96 @@ def export_results(results: list[VerifyResult], output_dir: Path, output_name: s
     return excel_path, json_path
 
 
+def brief_tracking_key(row: dict[str, object]) -> str:
+    tracking = normalize_text(row.get("追踪号"))
+    if tracking:
+        return tracking.upper()
+    return "|".join(normalize_text(row.get(column)) for column in BRIEF_COLUMNS).upper()
+
+
+def barcode_consistent_text(row: dict[str, object]) -> str:
+    if not bool(row.get("barcode_success")):
+        return "否"
+    if bool(row.get("barcode_matches_source")) or bool(row.get("barcode_matches_pdf_text")):
+        return "是"
+    if row.get("verify_status") in {"auto_pass_triple_verified", "auto_pass_barcode_verified"}:
+        return "是"
+    return "否"
+
+
+def make_brief_row(row: dict[str, object]) -> dict[str, object]:
+    return {
+        "追踪号": row.get("tracking_no", ""),
+        "承运商": row.get("carrier", ""),
+        "最终状态": row.get("verify_status_zh", ""),
+        "条码是否一致": barcode_consistent_text(row),
+    }
+
+
+def read_existing_brief_rows(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    try:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        log(f"读取旧 Excel 简略版失败，将重新生成: {path}; {exc}")
+        return []
+    try:
+        if BRIEF_SHEET_NAME not in workbook.sheetnames:
+            return []
+        sheet = workbook[BRIEF_SHEET_NAME]
+        rows = list(sheet.iter_rows(values_only=True))
+        if not rows:
+            return []
+        headers = [normalize_text(value) for value in rows[0]]
+        index_by_name = {name: index for index, name in enumerate(headers) if name}
+        result: list[dict[str, object]] = []
+        for values in rows[1:]:
+            item: dict[str, object] = {}
+            has_value = False
+            for column in BRIEF_COLUMNS:
+                index = index_by_name.get(column)
+                value = values[index] if index is not None and index < len(values) else ""
+                item[column] = value or ""
+                has_value = has_value or bool(value)
+            if has_value:
+                result.append(item)
+        return result
+    finally:
+        workbook.close()
+
+
+def merge_brief_rows(existing_rows: list[dict[str, object]], new_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    merged: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in [*existing_rows, *new_rows]:
+        key = brief_tracking_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append({column: row.get(column, "") for column in BRIEF_COLUMNS})
+    return merged
+
+
 def append_result_sheet(ws, rows: list[dict[str, object]]) -> None:
     ws.append([label for label, _key, _mode in BUSINESS_COLUMNS])
     for row in rows:
         ws.append([display_value(row.get(key, ""), mode) for _label, key, mode in BUSINESS_COLUMNS])
     format_result_sheet(ws)
+
+
+def append_brief_sheet(ws, rows: list[dict[str, object]]) -> None:
+    ws.append(list(BRIEF_COLUMNS))
+    for row in rows:
+        ws.append([row.get(column, "") for column in BRIEF_COLUMNS])
+
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+    autosize(ws)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
 
 
 def format_result_sheet(ws) -> None:
@@ -614,6 +701,10 @@ def business_rows(results: list[VerifyResult]) -> list[dict[str, object]]:
 
 def write_excel(results: list[VerifyResult], path: Path) -> None:
     rows = business_rows(results)
+    existing_brief_rows = read_existing_brief_rows(path)
+    current_brief_rows = [make_brief_row(row) for row in rows]
+    brief_rows = merge_brief_rows(existing_brief_rows, current_brief_rows)
+
     wb = Workbook()
 
     ws_all = wb.active
@@ -625,6 +716,9 @@ def write_excel(results: list[VerifyResult], path: Path) -> None:
 
     ws_summary = wb.create_sheet("统计汇总")
     append_summary_sheet(ws_summary, rows)
+
+    ws_brief = wb.create_sheet(BRIEF_SHEET_NAME)
+    append_brief_sheet(ws_brief, brief_rows)
 
     try:
         wb.save(path)

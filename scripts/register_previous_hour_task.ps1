@@ -26,8 +26,9 @@ if (-not (Test-Path -LiteralPath $runner)) {
 $startTime = [datetime]::Parse($StartAt)
 $endTime = [datetime]::Parse($EndAt)
 if ($endTime -le $startTime) {
-    throw "EndAt must be later than StartAt on the same day."
+    $endTime = $endTime.AddDays(1)
 }
+$windowMinute = $startTime.Minute
 
 $taskArgs = @(
     "-NoProfile",
@@ -36,7 +37,8 @@ $taskArgs = @(
     "-ProjectDir", "`"$ProjectDir`"",
     "-WhCodes", "`"$WhCodes`"",
     "-Statuses", "`"$Statuses`"",
-    "-Workers", $Workers
+    "-Workers", $Workers,
+    "-WindowMinute", $windowMinute
 )
 
 if ($Channel) {

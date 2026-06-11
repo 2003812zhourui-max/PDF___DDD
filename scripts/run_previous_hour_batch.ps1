@@ -3,6 +3,7 @@ param(
     [string]$WhCodes = "US02",
     [string]$Statuses = "10,15,20,30",
     [int]$Workers = 5,
+    [int]$WindowMinute = 0,
     [int]$Limit = 0,
     [string]$Channel = "",
     [string]$ProjectDir = "",
@@ -27,6 +28,10 @@ if (-not $PythonExe) {
     }
 }
 
+if ($WindowMinute -lt 0 -or $WindowMinute -gt 59) {
+    throw "WindowMinute must be between 0 and 59."
+}
+
 $envPath = Join-Path $ProjectDir ".env"
 if (Test-Path -LiteralPath $envPath) {
     Get-Content -LiteralPath $envPath | ForEach-Object {
@@ -42,11 +47,14 @@ if ($RunAt) {
     $referenceTime = Get-Date
 }
 
-$currentHourStart = $referenceTime.Date.AddHours($referenceTime.Hour)
-$start = $currentHourStart.AddHours(-1)
-$end = $currentHourStart.AddSeconds(-1)
+$currentWindowStart = $referenceTime.Date.AddHours($referenceTime.Hour).AddMinutes($WindowMinute)
+if ($referenceTime -lt $currentWindowStart) {
+    $currentWindowStart = $currentWindowStart.AddHours(-1)
+}
+$start = $currentWindowStart.AddHours(-1)
+$end = $currentWindowStart.AddSeconds(-1)
 $batchStamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$runName = "run_{0}_{1:00}00_{1:00}59_{2}" -f $start.ToString("yyyyMMdd"), $start.Hour, $batchStamp
+$runName = "run_{0}_{1}_{2}_{3}" -f $start.ToString("yyyyMMdd"), $start.ToString("HHmm"), $end.ToString("HHmm"), $batchStamp
 $outputDir = Join-Path $ProjectDir ("output\pdf\" + $runName)
 $mainPy = Join-Path $ProjectDir "main.py"
 
@@ -84,6 +92,7 @@ if ($Ocr) {
 Write-Host "ProjectDir: $ProjectDir"
 Write-Host "PythonExe : $PythonExe"
 Write-Host "RunAt     : $($referenceTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+Write-Host "WindowMin : $WindowMinute"
 Write-Host "Batch     : $($start.ToString('yyyy-MM-dd HH:mm:ss')) ~ $($end.ToString('yyyy-MM-dd HH:mm:ss'))"
 Write-Host "RunName   : $runName"
 Write-Host "Command   : & $PythonExe $($argsList -join ' ')"

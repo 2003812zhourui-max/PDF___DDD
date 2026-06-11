@@ -152,6 +152,40 @@ powershell -ExecutionPolicy Bypass -File scripts\register_previous_hour_task.ps1
 powershell -ExecutionPolicy Bypass -File scripts\run_previous_hour_batch.ps1 -RunAt "2026-06-11 01:00:00" -DryRun
 ```
 
+如果时间窗口是前一天 `22:30` 到当天 `22:30`，每小时滚动一次，可以这样注册：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register_previous_hour_task.ps1 -StartAt "23:30" -EndAt "22:30" -WhCodes US02 -Statuses "10,15,20,30" -Workers 5
+```
+
+触发关系是：
+
+```text
+23:30 -> 22:30:00 ~ 23:29:59
+00:30 -> 23:30:00 ~ 00:29:59
+...
+22:30 -> 21:30:00 ~ 22:29:59
+```
+
+## Excel 简略版
+
+每次导出 Excel 时，会保留原来的 `全部结果`、`异常复核`、`统计汇总` 逻辑，并额外生成或更新 `简略版` sheet。
+
+`简略版` 只包含：
+
+- `追踪号`
+- `承运商`
+- `最终状态`
+- `条码是否一致`
+
+如果同一个 Excel 文件里已经存在 `简略版`，程序会先读取旧数据，再追加本次小时数据，并按追踪号去重，最后覆盖保存原 Excel 文件。
+
+旧 Excel 也可以单独补 `简略版`：
+
+```powershell
+python scripts\update_brief_sheet.py "output\pdf\你的文件.xlsx"
+```
+
 ## 当前识别规则
 
 面单类型只重点识别三类：
