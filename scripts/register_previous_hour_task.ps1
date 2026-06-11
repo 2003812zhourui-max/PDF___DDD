@@ -7,6 +7,8 @@ param(
     [string]$Statuses = "10,15,20,30",
     [int]$Workers = 5,
     [string]$Channel = "",
+    [string]$MasterOutputName = "",
+    [string]$MasterOutputDir = "",
     [switch]$BrowserMode,
     [switch]$Ocr,
     [switch]$DryRun
@@ -43,6 +45,12 @@ $taskArgs = @(
 
 if ($Channel) {
     $taskArgs += @("-Channel", "`"$Channel`"")
+}
+if ($MasterOutputName) {
+    $taskArgs += @("-MasterOutputName", "`"$MasterOutputName`"")
+}
+if ($MasterOutputDir) {
+    $taskArgs += @("-MasterOutputDir", "`"$MasterOutputDir`"")
 }
 if ($BrowserMode) {
     $taskArgs += "-BrowserMode"

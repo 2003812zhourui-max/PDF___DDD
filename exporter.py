@@ -21,6 +21,7 @@ METADATA_JSONL = BASE_DIR / "output" / "download_label_metadata.jsonl"
 UNKNOWN = "UNKNOWN"
 NORMAL_LABEL_TEMPLATE = "普通面单"
 BRIEF_SHEET_NAME = "简略版"
+RESULT_SHEET_NAME = "全部结果"
 BRIEF_COLUMNS = ("追踪号", "承运商", "最终状态", "条码是否一致")
 
 REVIEW_STATUSES = {
@@ -529,6 +530,77 @@ def brief_tracking_key(row: dict[str, object]) -> str:
     return "|".join(normalize_text(row.get(column)) for column in BRIEF_COLUMNS).upper()
 
 
+def yes_no_to_bool(value: object) -> bool:
+    text = normalize_text(value)
+    if text in {"是", "YES", "Yes", "yes", "TRUE", "True", "true", "1"}:
+        return True
+    if text in {"否", "NO", "No", "no", "FALSE", "False", "false", "0"}:
+        return False
+    return bool(value)
+
+
+def business_row_key(row: dict[str, object]) -> str:
+    for key in ("tracking_no", "file_path", "order_no", "file_name"):
+        value = normalize_text(row.get(key))
+        if value:
+            return f"{key}:{value}".upper()
+    return "|".join(normalize_text(row.get(key)) for _label, key, _mode in BUSINESS_COLUMNS).upper()
+
+
+def read_existing_business_rows(path: Path, sheet_name: str = RESULT_SHEET_NAME) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    try:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        log(f"读取旧 Excel 全部结果失败，将重新生成: {path}; {exc}")
+        return []
+    try:
+        if sheet_name not in workbook.sheetnames:
+            return []
+        sheet = workbook[sheet_name]
+        rows = list(sheet.iter_rows(values_only=True))
+        if not rows:
+            return []
+        label_to_column = {label: (key, mode) for label, key, mode in BUSINESS_COLUMNS}
+        headers = [normalize_text(value) for value in rows[0]]
+        result: list[dict[str, object]] = []
+        for values in rows[1:]:
+            item: dict[str, object] = {}
+            has_value = False
+            for index, label in enumerate(headers):
+                if label not in label_to_column:
+                    continue
+                key, mode = label_to_column[label]
+                value = values[index] if index < len(values) else ""
+                item[key] = yes_no_to_bool(value) if mode == "yes_no" else (value or "")
+                has_value = has_value or bool(value)
+            if has_value:
+                result.append(item)
+        return result
+    finally:
+        workbook.close()
+
+
+def merge_business_rows(existing_rows: list[dict[str, object]], new_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    merged: list[dict[str, object]] = []
+    index_by_key: dict[str, int] = {}
+    for row in existing_rows:
+        key = business_row_key(row)
+        if key in index_by_key:
+            continue
+        index_by_key[key] = len(merged)
+        merged.append(row)
+    for row in new_rows:
+        key = business_row_key(row)
+        if key in index_by_key:
+            merged[index_by_key[key]] = row
+        else:
+            index_by_key[key] = len(merged)
+            merged.append(row)
+    return merged
+
+
 def barcode_consistent_text(row: dict[str, object]) -> str:
     if not bool(row.get("barcode_success")):
         return "否"
@@ -700,7 +772,9 @@ def business_rows(results: list[VerifyResult]) -> list[dict[str, object]]:
 
 
 def write_excel(results: list[VerifyResult], path: Path) -> None:
-    rows = business_rows(results)
+    current_rows = business_rows(results)
+    existing_rows = read_existing_business_rows(path)
+    rows = merge_business_rows(existing_rows, current_rows)
     existing_brief_rows = read_existing_brief_rows(path)
     current_brief_rows = [make_brief_row(row) for row in rows]
     brief_rows = merge_brief_rows(existing_brief_rows, current_brief_rows)
@@ -708,7 +782,7 @@ def write_excel(results: list[VerifyResult], path: Path) -> None:
     wb = Workbook()
 
     ws_all = wb.active
-    ws_all.title = "全部结果"
+    ws_all.title = RESULT_SHEET_NAME
     append_result_sheet(ws_all, rows)
 
     ws_review = wb.create_sheet("异常复核")

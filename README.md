@@ -186,6 +186,38 @@ powershell -ExecutionPolicy Bypass -File scripts\register_previous_hour_task.ps1
 python scripts\update_brief_sheet.py "output\pdf\你的文件.xlsx"
 ```
 
+## 总表模式
+
+如果不想每小时一个 Excel，而是从开始时间一路往下跑，把所有小时结果追加到同一个总表，用这个脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_window_batches_to_master.ps1 `
+  -StartTime "2026-06-10 22:30:00" `
+  -EndTime "2026-06-11 22:30:00" `
+  -MasterOutputName "master_20260610_2230_to_20260611_2230" `
+  -WhCodes US02 `
+  -Statuses "10,15,20,30" `
+  -Workers 5
+```
+
+这个模式下：
+
+- PDF 下载目录仍按小时分开，避免文件互相覆盖。
+- 下载日志仍按小时分开。
+- Excel 固定写入同一个总表：`output\pdf\master_...\master_....xlsx`。
+- `全部结果` 会读取旧数据后追加本小时数据，并按追踪号/文件路径去重。
+- `简略版` 也会增量追加并按追踪号去重。
+
+先预演，不真正下载：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_window_batches_to_master.ps1 `
+  -StartTime "2026-06-10 22:30:00" `
+  -EndTime "2026-06-11 22:30:00" `
+  -MasterOutputName "master_20260610_2230_to_20260611_2230" `
+  -DryRun
+```
+
 ## 当前识别规则
 
 面单类型只重点识别三类：

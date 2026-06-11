@@ -32,6 +32,9 @@ def sanitize_name(value: str) -> str:
 
 
 def batch_name(args) -> str:
+    download_name = getattr(args, "download_name", "")
+    if download_name:
+        return sanitize_name(download_name)
     if args.output_name and args.output_name != DEFAULT_OUTPUT_NAME:
         return sanitize_name(args.output_name)
     if args.start_time or args.end_time:

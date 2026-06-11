@@ -6,6 +6,8 @@ param(
     [int]$WindowMinute = 0,
     [int]$Limit = 0,
     [string]$Channel = "",
+    [string]$MasterOutputName = "",
+    [string]$MasterOutputDir = "",
     [string]$ProjectDir = "",
     [string]$PythonExe = "",
     [switch]$BrowserMode,
@@ -55,7 +57,8 @@ $start = $currentWindowStart.AddHours(-1)
 $end = $currentWindowStart.AddSeconds(-1)
 $batchStamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $runName = "run_{0}_{1}_{2}_{3}" -f $start.ToString("yyyyMMdd"), $start.ToString("HHmm"), $end.ToString("HHmm"), $batchStamp
-$outputDir = Join-Path $ProjectDir ("output\pdf\" + $runName)
+$outputName = if ($MasterOutputName) { $MasterOutputName } else { $runName }
+$outputDir = if ($MasterOutputDir) { $MasterOutputDir } else { Join-Path $ProjectDir ("output\pdf\" + $outputName) }
 $mainPy = Join-Path $ProjectDir "main.py"
 
 if (-not (Test-Path -LiteralPath $mainPy)) {
@@ -72,7 +75,8 @@ $argsList = @(
     "--statuses", $Statuses,
     "--workers", [string]$Workers,
     "--force",
-    "--output-name", $runName,
+    "--download-name", $runName,
+    "--output-name", $outputName,
     "--output-dir", $outputDir
 )
 
@@ -95,6 +99,7 @@ Write-Host "RunAt     : $($referenceTime.ToString('yyyy-MM-dd HH:mm:ss'))"
 Write-Host "WindowMin : $WindowMinute"
 Write-Host "Batch     : $($start.ToString('yyyy-MM-dd HH:mm:ss')) ~ $($end.ToString('yyyy-MM-dd HH:mm:ss'))"
 Write-Host "RunName   : $runName"
+Write-Host "Output    : $outputName"
 Write-Host "Command   : & $PythonExe $($argsList -join ' ')"
 
 if ($DryRun) {

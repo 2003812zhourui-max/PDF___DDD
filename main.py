@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strict-json", default="", help="已有严格识别 JSON；传入后按 JSON 继续条码补验")
     parser.add_argument("--storage-state", default="", help="WMS 登录态 JSON 文件路径")
     parser.add_argument("--download-log", default=str(DEFAULT_DOWNLOAD_LOG), help="下载日志 CSV，包含 expressNo/filePath")
+    parser.add_argument("--download-name", default="", help="下载批次名；不传时默认跟 output-name 一致")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Excel/JSON 输出目录")
     parser.add_argument("--output-name", default="pdf_label_pipeline_result", help="输出文件名前缀")
     parser.add_argument("--rotations", action="store_true", help="启用 90/180/270 度旋转条码识别")
