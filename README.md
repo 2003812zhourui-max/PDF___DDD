@@ -72,6 +72,52 @@ python main.py --browser-mode --start-time "2026-06-10 00:00:00" --end-time "202
 python evaluate_samples.py --samples-dir samples --output output\evaluation\sample_eval.json
 ```
 
+## 按小时批量运行
+
+跑某一天 24 个小时，每个小时一个独立下载目录、独立下载日志、独立 Excel/JSON 输出目录：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_hourly_batches.ps1 -BatchDate 2026-06-11 -WhCodes US02 -Statuses "10,15,20,30" -Workers 5
+```
+
+只跑其中几个小时，例如 0 点到 2 点：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_hourly_batches.ps1 -BatchDate 2026-06-11 -StartHour 0 -EndHour 2 -WhCodes US02 -Statuses "10,15,20,30" -Workers 5
+```
+
+先检查会跑哪些时间段和命令，但不真正下载：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_hourly_batches.ps1 -BatchDate 2026-06-11 -StartHour 0 -EndHour 24 -DryRun
+```
+
+这个脚本默认带 `--force`，所以每一小时都会重新下载、重新识别。输出示例：
+
+```text
+pdf_downloads\run_20260611_0000_0059_20260611_120000
+logs\run_20260611_0000_0059_20260611_120000_download_log.csv
+output\pdf\run_20260611_0000_0059_20260611_120000\run_20260611_0000_0059_20260611_120000.xlsx
+```
+
+注册每天自动运行的 Windows 定时任务，默认每天 02:30 跑昨天完整 24 小时：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register_hourly_batches_task.ps1 -Schedule Daily -At "02:30" -WhCodes US02 -Statuses "10,15,20,30" -Workers 5
+```
+
+注册每周一自动运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register_hourly_batches_task.ps1 -Schedule Weekly -DaysOfWeek Monday -At "02:30" -WhCodes US02 -Statuses "10,15,20,30" -Workers 5
+```
+
+手动触发定时任务：
+
+```powershell
+Start-ScheduledTask -TaskName "PDF_DDD hourly batches"
+```
+
 ## 当前识别规则
 
 面单类型只重点识别三类：
