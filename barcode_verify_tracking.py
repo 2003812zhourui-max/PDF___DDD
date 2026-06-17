@@ -31,7 +31,7 @@ TRACKING_STATUS_STRONG = {
     "auto_pass_text_verified",
     "auto_pass_verified_prefix",
 }
-REVIEW_STATUSES = {"review_conflict", "review_unknown", "barcode_failed"}
+REVIEW_STATUSES = {"review_conflict", "review_unknown", "barcode_failed", "image_ocr_detected"}
 SOURCE_ONLY_STATUSES = {
     "auto_pass_source_only",
     "auto_pass_source_consistent",
@@ -54,6 +54,7 @@ STATUS_ZH = {
     "review_conflict": "需要复核：多来源结果冲突",
     "review_unknown": "需要复核：无法识别",
     "barcode_failed": "条码识别失败",
+    "image_ocr_detected": "图片识别到信息：需人工复核",
     "ocr_needed": "需要 OCR 深度识别",
     "download_file_error": "下载文件异常",
 }
@@ -204,6 +205,11 @@ def file_format(path: Path) -> str:
     return path.suffix.lower().lstrip(".")
 
 
+def suffix_format(value: object) -> str:
+    suffix = Path(str(value or "")).suffix.lower().lstrip(".")
+    return suffix
+
+
 def file_type(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
@@ -330,6 +336,219 @@ def match_template_corner_text(text: str, source: str, confidence: str) -> Templ
     return match
 
 
+def normalized_template_image(image: Image.Image, target_width: int = 430) -> Image.Image:
+    gray = ImageOps.grayscale(image)
+    width, height = gray.size
+    if width <= 0 or height <= 0 or width == target_width:
+        return gray
+    target_height = max(1, int(height * target_width / width))
+    return gray.resize((target_width, target_height))
+
+
+def dark_components(
+    image: Image.Image,
+    *,
+    y_start_ratio: float = 0.60,
+    threshold: int = 110,
+    min_pixels: int = 10,
+) -> tuple[int, int, list[tuple[int, int, int, int, int]]]:
+    """Return dark connected components in the lower label area.
+
+    This is intentionally narrow: it recognizes large template markers such as
+    0024, LAX-CBS, and CBT without requiring a full OCR installation.
+    """
+    gray = normalized_template_image(image)
+    width, height = gray.size
+    top = max(0, min(height - 1, int(height * y_start_ratio)))
+    crop = gray.crop((0, top, width, height))
+    bw = crop.point(lambda value: 1 if value < threshold else 0, mode="1")
+    pixels = bw.load()
+    crop_width, crop_height = bw.size
+    seen = bytearray(crop_width * crop_height)
+    components: list[tuple[int, int, int, int, int]] = []
+
+    for y in range(crop_height):
+        for x in range(crop_width):
+            index = y * crop_width + x
+            if seen[index] or not pixels[x, y]:
+                continue
+            stack = [(x, y)]
+            seen[index] = 1
+            min_x = max_x = x
+            min_y = max_y = y
+            count = 0
+            while stack:
+                current_x, current_y = stack.pop()
+                count += 1
+                min_x = min(min_x, current_x)
+                max_x = max(max_x, current_x)
+                min_y = min(min_y, current_y)
+                max_y = max(max_y, current_y)
+                for next_x, next_y in (
+                    (current_x + 1, current_y),
+                    (current_x - 1, current_y),
+                    (current_x, current_y + 1),
+                    (current_x, current_y - 1),
+                ):
+                    if 0 <= next_x < crop_width and 0 <= next_y < crop_height:
+                        next_index = next_y * crop_width + next_x
+                        if not seen[next_index] and pixels[next_x, next_y]:
+                            seen[next_index] = 1
+                            stack.append((next_x, next_y))
+            if count >= min_pixels:
+                components.append((min_x, min_y + top, max_x, max_y + top, count))
+
+    return width, height, components
+
+
+def match_template_visual(image: Image.Image) -> TemplateMatch:
+    width, height, components = dark_components(image)
+
+    top_width, top_height, top_components = dark_components(image, y_start_ratio=0.0)
+    top_digits = []
+    for component in top_components:
+        x1, y1, x2, y2, count = component
+        box_width = x2 - x1 + 1
+        box_height = y2 - y1 + 1
+        area = max(1, box_width * box_height)
+        density = count / area
+        if (
+            y1 < top_height * 0.18
+            and x1 < top_width * 0.55
+            and 25 <= box_width <= 60
+            and 40 <= box_height <= 80
+            and density > 0.35
+        ):
+            top_digits.append(component)
+    top_digits = sorted(top_digits, key=lambda item: item[0])
+    if len(top_digits) >= 4:
+        first_four = top_digits[:4]
+        span = first_four[-1][2] - first_four[0][0] + 1
+        gaps = [first_four[index + 1][0] - first_four[index][2] for index in range(3)]
+        if first_four[0][0] < top_width * 0.15 and 130 <= span <= 230 and all(0 <= gap <= 25 for gap in gaps):
+            return TemplateMatch(
+                template_code="0024",
+                template_sub_code="",
+                template_marker="0024",
+                template_source="图像角标",
+                template_confidence="中",
+            )
+
+    for x1, y1, x2, y2, count in components:
+        box_width = x2 - x1 + 1
+        box_height = y2 - y1 + 1
+        area = max(1, box_width * box_height)
+        density = count / area
+        if (
+            y1 > height * 0.83
+            and x1 < width * 0.38
+            and 35 <= box_width <= 110
+            and 35 <= box_height <= 100
+            and density > 0.18
+        ):
+            return TemplateMatch(
+                template_code="0024",
+                template_sub_code="",
+                template_marker="0024",
+                template_source="图像角标",
+                template_confidence="中",
+            )
+
+    for x1, y1, x2, y2, _count in components:
+        box_width = x2 - x1 + 1
+        box_height = y2 - y1 + 1
+        if (
+            y1 > height * 0.73
+            and y2 < height * 0.93
+            and x1 < width * 0.25
+            and 120 <= box_width <= 260
+            and 24 <= box_height <= 60
+        ):
+            return TemplateMatch(
+                template_code="CBT",
+                template_sub_code=NORMAL_LABEL_SUBDIVISION,
+                template_marker="CBT",
+                template_source="图像角标",
+                template_confidence="中",
+            )
+
+    chars: list[tuple[int, int, int, int, int]] = []
+    for component in components:
+        x1, y1, x2, y2, _count = component
+        box_width = x2 - x1 + 1
+        box_height = y2 - y1 + 1
+        center_y = (y1 + y2) / 2
+        if (
+            height * 0.72 <= center_y <= height * 0.96
+            and x1 < width * 0.62
+            and 8 <= box_width <= 42
+            and 12 <= box_height <= 45
+        ):
+            chars.append(component)
+
+    groups: list[dict[str, Any]] = []
+    for component in sorted(chars, key=lambda item: (item[1] + item[3]) / 2):
+        center_y = (component[1] + component[3]) / 2
+        for group in groups:
+            if abs(float(group["center_y"]) - center_y) < 7:
+                group["items"].append(component)
+                group["center_y"] = (
+                    float(group["center_y"]) * (len(group["items"]) - 1) + center_y
+                ) / len(group["items"])
+                break
+        else:
+            groups.append({"center_y": center_y, "items": [component]})
+
+    for group in groups:
+        items = sorted(group["items"], key=lambda item: item[0])
+        if len(items) < 3:
+            continue
+        first_three = items[:3]
+        widths = [item[2] - item[0] + 1 for item in first_three]
+        heights = [item[3] - item[1] + 1 for item in first_three]
+        span = first_three[-1][2] - first_three[0][0] + 1
+        gaps = [first_three[index + 1][0] - first_three[index][2] for index in range(2)]
+        if (
+            first_three[0][0] <= 70
+            and all(14 <= value <= 28 for value in widths)
+            and all(18 <= value <= 28 for value in heights)
+            and all(0 <= value <= 12 for value in gaps)
+            and 45 <= span <= 90
+        ):
+            return TemplateMatch(
+                template_code="CBT",
+                template_sub_code=NORMAL_LABEL_SUBDIVISION,
+                template_marker="CBT",
+                template_source="图像角标",
+                template_confidence="中",
+            )
+
+    for x1, y1, x2, y2, count in components:
+        box_width = x2 - x1 + 1
+        box_height = y2 - y1 + 1
+        area = max(1, box_width * box_height)
+        density = count / area
+        center_x = (x1 + x2) / 2
+        aspect = box_width / max(1, box_height)
+        if (
+            y1 > height * 0.78
+            and width * 0.25 < center_x < width * 0.75
+            and 90 <= box_width <= 220
+            and 24 <= box_height <= 65
+            and 2.0 <= aspect <= 5.5
+            and density > 0.18
+        ):
+            return TemplateMatch(
+                template_code="CBS",
+                template_sub_code=NORMAL_LABEL_SUBDIVISION,
+                template_marker="CBS",
+                template_source="图像角标",
+                template_confidence="中",
+            )
+
+    return TemplateMatch()
+
+
 def merge_template_match(primary: TemplateMatch, fallback: TemplateMatch) -> TemplateMatch:
     return primary if primary.template_code else fallback
 
@@ -431,6 +650,12 @@ def detect_template(
             return match
 
     images, image_error = first_page_images_for_template(path, dpi=dpi, is_image_label=is_image_label)
+    if not image_error and images:
+        for image in images:
+            match = match_template_visual(image)
+            if match.template_code:
+                return match
+
     if not image_error and images and load_ocr_engine() is not None:
         for image in images:
             match = match_template_corner_text(ocr_template_corner(image), "左下模板OCR", "中")
@@ -780,6 +1005,7 @@ def load_metadata_index(path: Path) -> tuple[dict[str, dict[str, str]], dict[str
                 continue
             source_fields = row.get("source_fields") if isinstance(row.get("source_fields"), dict) else {}
             recognition = row.get("metadata_recognition") if isinstance(row.get("metadata_recognition"), dict) else {}
+            source_file_name = str(source_fields.get("fileName", "") or "")
             meta = {
                 "carrier": recognition.get("carrier", "") or source_fields.get("logisticsCarrier", ""),
                 "channel": recognition.get("channel", "") or source_fields.get("logisticsChannelName", "")
@@ -791,6 +1017,8 @@ def load_metadata_index(path: Path) -> tuple[dict[str, dict[str, str]], dict[str
                 "platform_order_no": source_fields.get("platformOrderNo", ""),
                 "tracking_no": row.get("tracking_no", ""),
                 "order_no": row.get("order_no", ""),
+                "source_file_name": source_file_name,
+                "source_file_format": suffix_format(source_file_name),
             }
             fname = row.get("file_name", "")
             if fname:
@@ -828,6 +1056,8 @@ def enrich_row_from_metadata(
         row["meta_customer_code"] = meta.get("customer_code", "")
         row["meta_wh_code"] = meta.get("wh_code", "")
         row["meta_source"] = "metadata"
+        row["source_file_name"] = meta.get("source_file_name", "")
+        row["source_file_format"] = meta.get("source_file_format", "")
 
 
 def rows_from_input_dir(input_dir: Path, wms_records: dict[str, str],
@@ -1059,29 +1289,33 @@ def error_result(row: dict[str, Any], wms_records: dict[str, str], exc: Exceptio
     file_path = Path(str(row.get("file_path") or row.get("pdf_path") or ""))
     error_text = str(exc)
     current_file_type = file_type(file_path)
-    current_file_format = file_format(file_path)
+    current_file_format = str(row.get("source_file_format") or "") or file_format(file_path)
     image_label = is_image_file(file_path)
+    if current_file_format and current_file_format != "pdf":
+        current_file_type = "非PDF"
+        image_label = False
+    carrier_hint = str(row.get("meta_carrier") or "UNKNOWN")
     return VerifyResult(
         file_name=str(row.get("file_name") or file_path.name),
         file_path=str(file_path),
         file_type=current_file_type,
         file_format=current_file_format,
         is_image_label=image_label,
-        carrier="UNKNOWN",
-        last_mile_carrier="UNKNOWN",
+        carrier=carrier_hint,
+        last_mile_carrier=carrier_hint,
         template_code="",
         template_sub_code="",
         template_marker="",
-        carrier_display="UNKNOWN",
+        carrier_display=carrier_hint,
         template_source="",
         template_confidence="",
         source_tracking=source_tracking_from_row(row, wms_records),
         filename_tracking="",
         pdf_text_tracking="",
         barcode_tracking="",
-        download_order_no=str(row.get("delivery_no") or row.get("deliveryNo") or ""),
+        download_order_no=str(row.get("delivery_no") or row.get("deliveryNo") or row.get("order_no") or ""),
         download_wave_no=str(row.get("source_no") or row.get("sourceNo") or row.get("waveNo") or ""),
-        download_warehouse=str(row.get("whCode") or row.get("wh_code") or ""),
+        download_warehouse=str(row.get("whCode") or row.get("wh_code") or row.get("meta_wh_code") or ""),
         ocr_tracking="",
         all_text_candidates="",
         all_barcode_candidates="",
@@ -1132,6 +1366,14 @@ def process_row(row: dict[str, Any], args: argparse.Namespace, zxingcpp: Any | N
     download_order_no = str(row.get("delivery_no") or row.get("deliveryNo") or "")
     download_wave_no = str(row.get("source_no") or row.get("sourceNo") or row.get("waveNo") or "")
     download_warehouse = str(row.get("whCode") or row.get("wh_code") or "")
+    source_file_name = str(row.get("source_file_name") or "")
+    source_file_format = str(row.get("source_file_format") or "").lower()
+    if source_file_format and source_file_format != "pdf" and not image_label:
+        return error_result(
+            row,
+            wms_records,
+            f"non-PDF source label file: {source_file_name or file_path.name}",
+        )
     meta_carrier = str(row.get("meta_carrier") or "")
     meta_channel = str(row.get("meta_channel") or "")
     meta_channel_code = str(row.get("meta_channel_code") or "")
@@ -1229,6 +1471,11 @@ def process_row(row: dict[str, Any], args: argparse.Namespace, zxingcpp: Any | N
             carrier=carrier,
             barcode_error=barcode_error,
         )
+    if image_label and verify_status in TRACKING_STATUS_STRONG:
+        verify_status = "image_ocr_detected"
+        confidence = "review"
+        status_reason = "image label barcode/text detected; manual review required"
+        need_review = True
     reason_parts.insert(0, status_reason)
     if verify_status == "source_only_low_confidence" and barcode_error and "timeout" in barcode_error.lower():
         verify_status = "barcode_failed"
@@ -1443,6 +1690,7 @@ def print_summary(results: list[VerifyResult]) -> None:
         "review_conflict",
         "review_unknown",
         "barcode_failed",
+        "image_ocr_detected",
         "ocr_needed",
         "download_file_error",
     ]:

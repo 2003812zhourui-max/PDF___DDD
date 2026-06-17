@@ -100,7 +100,7 @@
 
 ### `batch_download_wms_pdfs.py`
 
-历史较完整的 WMS 下载脚本，兼容 HTTP 轻量模式和 Playwright 浏览器模式。
+完整的 WMS 下载脚本，兼容 HTTP 轻量模式和 Playwright 浏览器模式。
 
 职责：
 
@@ -257,4 +257,3 @@ GUI 到核心流水线的参数适配层。
 | `run_window_batches_to_master.ps1` | 从开始时间到结束时间按小时运行，并追加到总表。 |
 | `send_feishu_notification.py` | 发送飞书机器人通知。 |
 | `send_feishu_file.py` | 上传并发送飞书文件消息。 |
-

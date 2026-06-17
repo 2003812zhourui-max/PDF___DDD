@@ -34,6 +34,7 @@ from batch_download_wms_pdfs import (
     fetch_json_http_with_auth_retry as _fetch_json,
     fetch_json_http as _fetch_json_direct,
     download_pdf_http as _download_pdf,
+    append_label_metadata,
 )
 
 # ============================
@@ -56,6 +57,7 @@ CSV_FIELDS = [
     "deliveryNo", "sourceNo", "expressNo", "customerCode",
     "whCode", "status", "filePath", "error", "downloadedAt",
 ]
+LABEL_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
 
 # ============================
@@ -63,6 +65,9 @@ CSV_FIELDS = [
 # ============================
 
 _log_lock = threading.Lock()
+_metadata_lock = threading.Lock()
+_success_lock = threading.Lock()
+_thread_local = threading.local()
 _counter = {"done": 0, "total": 0}
 
 
@@ -100,6 +105,17 @@ def first_non_empty(record: dict[str, Any], *keys: str) -> str:
 
 def compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def retry_delay(attempt: int, base_delay: float) -> float:
+    # 优化备注：指数退避加轻微抖动，避免 WMS 短时限流/断连后所有线程同时重试。
+    jitter = (uuid.uuid4().int % 100) / 1000
+    return min(base_delay * (2 ** max(attempt - 1, 0)) + jitter, 8.0)
+
+
+def is_token_error(error_text: str) -> bool:
+    text = str(error_text or "").lower()
+    return "401" in text or "unauthorized" in text or "请求未授权" in text or ("token" in text and "expired" in text)
 
 
 # ============================
@@ -313,11 +329,20 @@ def normalize_order(record: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def make_pdf_path(order: dict[str, str], count: int, idx: int) -> Path:
+def label_suffix(file_name: str) -> str:
+    suffix = Path(str(file_name or "")).suffix.lower()
+    return suffix if suffix in LABEL_SUFFIXES else ".pdf"
+
+
+def make_label_path(order: dict[str, str], count: int, idx: int, file_name: str = "") -> Path:
     dno = sanitize(order["deliveryNo"])
     eno = sanitize(order["expressNo"])
     suffix = f"_{idx}" if count > 1 else ""
-    return PDF_DIR / f"{dno}_{eno}{suffix}.pdf"
+    return PDF_DIR / f"{dno}_{eno}{suffix}{label_suffix(file_name)}"
+
+
+def make_pdf_path(order: dict[str, str], count: int, idx: int) -> Path:
+    return make_label_path(order, count, idx)
 
 
 def load_success_set() -> set[str]:
@@ -343,6 +368,21 @@ def append_log(row: dict[str, Any]) -> None:
             if not exists:
                 writer.writeheader()
             writer.writerow({field: row.get(field, "") for field in CSV_FIELDS})
+
+
+def append_metadata_safely(
+    pdf_path: Path,
+    order: dict[str, str],
+    detail: dict[str, Any],
+    label: dict[str, Any],
+    url_json: dict[str, Any],
+    download_url: str,
+) -> None:
+    try:
+        with _metadata_lock:
+            append_label_metadata(pdf_path, order, detail, label, url_json, download_url)
+    except Exception as exc:
+        log(f"metadata 写入失败，继续下载流程: {exc}")
 
 
 def process_one_order(session, auth_values, order: dict[str, str]) -> list[Path]:
@@ -374,31 +414,43 @@ def process_one_order(session, auth_values, order: dict[str, str]) -> list[Path]
         dl_url = url_json.get("data", {}).get("downLoadUrl") if isinstance(url_json.get("data"), dict) else ""
         if not dl_url:
             raise RuntimeError("下载链接接口没有返回 downLoadUrl")
-        pdf_path = make_pdf_path(detail_order, len(labels), idx)
+        pdf_path = make_label_path(detail_order, len(labels), idx, str(label.get("fileName") or ""))
         download_pdf(session, dl_url, pdf_path)
+        append_metadata_safely(pdf_path, detail_order, detail, label, url_json, dl_url)
         saved.append(pdf_path)
     return saved
 
 
-def download_task(session, auth_values, order: dict[str, str], success_set: set[str], force: bool) -> dict:
+def download_task(
+    session,
+    auth_values,
+    order: dict[str, str],
+    success_set: set[str],
+    force: bool,
+    max_attempts: int = 3,
+    retry_base_delay: float = 1.0,
+) -> dict:
     dno = order["deliveryNo"]
-    if not force and dno in success_set:
+    with _success_lock:
+        already_success = dno in success_set
+    if not force and already_success:
         return {"deliveryNo": dno, "status": "skipped"}
 
     last_error = ""
-    for attempt in range(1, 4):
+    for attempt in range(1, max_attempts + 1):
         try:
             paths = process_one_order(session, auth_values, order)
             fp = "|".join(str(p.resolve()) for p in paths)
             append_log({**order, "status": "success", "filePath": fp, "error": "", "downloadedAt": now_text()})
-            success_set.add(dno)
+            with _success_lock:
+                success_set.add(dno)
             return {"deliveryNo": dno, "status": "success", "filePath": fp}
-        except RuntimeError as exc:
+        except Exception as exc:
             last_error = str(exc)
-            if "401" in last_error:
+            if is_token_error(last_error):
                 return {"deliveryNo": dno, "status": "token_expired", "error": last_error}
-            if attempt < 3:
-                time.sleep(1)
+            if attempt < max_attempts:
+                time.sleep(retry_delay(attempt, retry_base_delay))
 
     append_log({**order, "status": "failed", "filePath": "", "error": last_error, "downloadedAt": now_text()})
     return {"deliveryNo": dno, "status": "failed", "error": last_error}
@@ -423,9 +475,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end-time", default="")
     p.add_argument("--status", default="15")
     p.add_argument("--size", type=int, default=100)
-    p.add_argument("--max-pages", type=int, default=10)
-    p.add_argument("--limit", type=int, default=1000)
-    p.add_argument("--workers", type=int, default=5)
+    p.add_argument("--max-pages", type=int, default=0, help="最大页数；0 表示不限，直到接口没有更多记录")
+    p.add_argument("--limit", type=int, default=0, help="最多下载订单数；0 表示不限")
+    p.add_argument("--workers", type=int, default=8, help="下载并发线程数；服务器上可按带宽/API限流调整")
+    p.add_argument("--download-retries", type=int, default=5, help="单订单下载最大尝试次数，默认 5")
+    p.add_argument("--retry-base-delay", type=float, default=0.8, help="下载/列表重试基础等待秒数，默认 0.8")
     p.add_argument("--pdf-dir", default=str(PDF_DIR))
     p.add_argument("--log-file", default=str(LOG_FILE))
     p.add_argument("--channel", default="", help="物流渠道筛选，例如 TikTok-CBT-US、Upload_Shipping_Label-Speedx")
@@ -463,31 +517,43 @@ def process_one(session, auth_values, order: dict[str, str]) -> list[Path]:
         dl_url = url_json.get("data", {}).get("downLoadUrl") if isinstance(url_json.get("data"), dict) else ""
         if not dl_url:
             raise RuntimeError("下载链接接口没有返回 downLoadUrl")
-        pdf_path = make_pdf_path(d_order, len(labels), idx)
+        pdf_path = make_label_path(d_order, len(labels), idx, str(label.get("fileName") or ""))
         _download_pdf(session, dl_url, pdf_path)
+        append_metadata_safely(pdf_path, d_order, detail, label, url_json, dl_url)
         saved.append(pdf_path)
     return saved
 
 
-def download_task(session, auth_values, order: dict[str, str], success_set: set[str], force: bool) -> dict:
+def download_task(
+    session,
+    auth_values,
+    order: dict[str, str],
+    success_set: set[str],
+    force: bool,
+    max_attempts: int = 3,
+    retry_base_delay: float = 1.0,
+) -> dict:
     dno = order["deliveryNo"]
-    if not force and dno in success_set:
+    with _success_lock:
+        already_success = dno in success_set
+    if not force and already_success:
         return {"deliveryNo": dno, "status": "skipped"}
 
     last_error = ""
-    for attempt in range(1, 4):
+    for attempt in range(1, max_attempts + 1):
         try:
             paths = process_one(session, auth_values, order)
             fp = "|".join(str(p.resolve()) for p in paths)
             append_log({**order, "status": "success", "filePath": fp, "error": "", "downloadedAt": now_text()})
-            success_set.add(dno)
+            with _success_lock:
+                success_set.add(dno)
             return {"deliveryNo": dno, "status": "success", "filePath": fp}
-        except RuntimeError as exc:
+        except Exception as exc:
             last_error = str(exc)
-            if "401" in last_error:
+            if is_token_error(last_error):
                 return {"deliveryNo": dno, "status": "token_expired", "error": last_error}
-            if attempt < 3:
-                time.sleep(1)
+            if attempt < max_attempts:
+                time.sleep(retry_delay(attempt, retry_base_delay))
 
     append_log({**order, "status": "failed", "filePath": "", "error": last_error, "downloadedAt": now_text()})
     return {"deliveryNo": dno, "status": "failed", "error": last_error}
@@ -506,6 +572,80 @@ def _refresh_session(args, wh_code: str) -> tuple[Any, list[str]]:
     session, auth_values = _build_session(str(AUTH_STATE_FILE), wh_code, "auto")
     log("登录态已刷新")
     return session, auth_values
+
+
+def clear_thread_client() -> None:
+    if hasattr(_thread_local, "clients"):
+        _thread_local.clients = {}
+
+
+def get_thread_client(wh_code: str, version: int = 0) -> tuple[Any, list[str]]:
+    # 优化备注：requests.Session 不是为多线程共享设计的；按线程缓存 session，减少连接争用并保留连接复用速度。
+    clients = getattr(_thread_local, "clients", None)
+    client_version = getattr(_thread_local, "client_version", None)
+    if client_version != version:
+        clients = {}
+        _thread_local.clients = clients
+        _thread_local.client_version = version
+    if clients is None:
+        clients = {}
+        _thread_local.clients = clients
+        _thread_local.client_version = version
+    if wh_code not in clients:
+        clients[wh_code] = _build_session(str(AUTH_STATE_FILE), wh_code, "auto")
+    session, auth_values = clients[wh_code]
+    session.headers["whcode"] = wh_code
+    return session, auth_values
+
+
+def fetch_order_page_with_retry(
+    session,
+    auth_values,
+    payload: dict[str, Any],
+    max_attempts: int,
+    retry_base_delay: float,
+) -> dict[str, Any]:
+    # 优化备注：列表页偶发 ConnectionReset 时只重试当前页，避免整批任务从头失败。
+    last_error = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _fetch_json(session, auth_values, LIST_API, method="POST", payload=payload)
+        except Exception as exc:
+            last_error = str(exc)
+            if is_token_error(last_error) or attempt >= max_attempts:
+                raise
+            log(f"列表接口失败，重试 {attempt + 1}/{max_attempts}: {last_error[:120]}")
+            time.sleep(retry_delay(attempt, retry_base_delay))
+    raise RuntimeError(last_error)
+
+
+def write_download_summary(
+    args,
+    start_time: str,
+    end_time: str,
+    stats: dict[str, int],
+    elapsed: float,
+    total_orders: int,
+) -> Path:
+    # 优化备注：summary JSON 是给飞书/服务器消费的稳定接口，不依赖解析控制台日志。
+    summary_path = LOG_FILE.with_name(f"{LOG_FILE.stem}_summary.json")
+    payload = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "wh_codes": [c.strip() for c in args.wh_codes.split(",") if c.strip()],
+        "statuses": [s.strip() for s in args.status.split(",") if s.strip()],
+        "channel": args.channel,
+        "workers": args.workers,
+        "download_retries": args.download_retries,
+        "total_orders": total_orders,
+        "stats": stats,
+        "elapsed_seconds": round(elapsed, 3),
+        "pdf_dir": str(PDF_DIR.resolve()),
+        "download_log": str(LOG_FILE.resolve()),
+        "written_at": now_text(),
+    }
+    summary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary_path
 
 
 def main() -> None:
@@ -535,6 +675,7 @@ def main() -> None:
     log(f"仓库: {wh_codes}")
     log(f"状态: {status_values}")
     log(f"并发: {args.workers}")
+    log(f"下载重试: {args.download_retries} 次，基础退避: {args.retry_base_delay}s")
     if args.channel:
         log(f"物流渠道: {args.channel}")
 
@@ -558,7 +699,8 @@ def main() -> None:
         session.headers["whcode"] = wh_code
         for status in status_values:
             log(f"获取 {wh_code} 状态 {status} 订单...")
-            for page in range(1, args.max_pages + 1):
+            page = 1
+            while args.max_pages <= 0 or page <= args.max_pages:
                 payload = {
                     "appendixFlag": "", "areaCodes": [], "categoryIdList": [], "cellNos": [],
                     "codeType": "barcode", "countKind": "orderWeight", "countryRegionCodes": "",
@@ -572,7 +714,13 @@ def main() -> None:
                     "unitMark": 0, "varietyType": "", "weightCountEnd": "",
                     "weightCountStart": "", "whCode": wh_code, "withVas": "",
                 }
-                data = _fetch_json(session, auth_values, LIST_API, method="POST", payload=payload)
+                data = fetch_order_page_with_retry(
+                    session,
+                    auth_values,
+                    payload,
+                    max_attempts=max(1, args.download_retries),
+                    retry_base_delay=max(0.1, args.retry_base_delay),
+                )
                 records = data.get("data", {}).get("records", []) if isinstance(data.get("data"), dict) else []
                 if not records:
                     break
@@ -583,6 +731,7 @@ def main() -> None:
                 log(f"  status={status} page={page}: {len(records)} 条")
                 if len(records) < args.size:
                     break
+                page += 1
 
     # 过滤
     seen = set()
@@ -600,7 +749,8 @@ def main() -> None:
         log("没有需要下载的订单")
         return
 
-    filtered = filtered[:args.limit]
+    if args.limit and args.limit > 0:
+        filtered = filtered[:args.limit]
     _counter["total"] = len(filtered)
     _counter["done"] = 0
 
@@ -608,15 +758,22 @@ def main() -> None:
     t0 = time.time()
     stats = {"ok": 0, "fail": 0, "skip": 0, "refresh": 0}
 
-    # 用 list 包装以便在闭包中修改
-    _session_ref = [session]
-    _auth_ref = [auth_values]
     _refresh_lock = threading.Lock()
+    _refresh_state = {"version": 0}
     _max_refresh = 3  # 最多自动刷新 3 次
 
     def do_task(wc, o):
         for attempt in range(2):  # 最多重试 1 次（刷新后重试）
-            result = download_task(_session_ref[0], _auth_ref[0], o, success_set, args.force)
+            task_session, task_auth = get_thread_client(wc, _refresh_state["version"])
+            result = download_task(
+                task_session,
+                task_auth,
+                o,
+                success_set,
+                args.force,
+                max_attempts=max(1, args.download_retries),
+                retry_base_delay=max(0.1, args.retry_base_delay),
+            )
             if result["status"] != "token_expired":
                 return result
             # token 过期，尝试刷新
@@ -627,9 +784,9 @@ def main() -> None:
                 stats["refresh"] += 1
                 log(f"Token 过期，自动刷新 ({stats['refresh']}/{_max_refresh})...")
                 try:
-                    new_session, new_auth = _refresh_session(args, wh_codes[0])
-                    _session_ref[0] = new_session
-                    _auth_ref[0] = new_auth
+                    _refresh_session(args, wc)
+                    _refresh_state["version"] += 1
+                    clear_thread_client()
                 except Exception as refresh_err:
                     log(f"刷新失败: {refresh_err}")
                     return result
@@ -643,12 +800,14 @@ def main() -> None:
             try:
                 r = fut.result()
             except Exception as e:
+                append_log({**o, "status": "failed", "filePath": "", "error": str(e), "downloadedAt": now_text()})
                 r = {"deliveryNo": o["deliveryNo"], "status": "failed", "error": str(e)}
             s = r["status"]
             dno = r["deliveryNo"]
             if s == "token_expired":
                 # 刷新次数用尽
                 stats["fail"] += 1
+                append_log({**o, "status": "failed", "filePath": "", "error": r.get("error", "token expired"), "downloadedAt": now_text()})
                 progress_log(dno, "[FAIL]", "token expired, max refresh reached")
             elif s == "success":
                 stats["ok"] += 1
@@ -662,6 +821,8 @@ def main() -> None:
 
     elapsed = time.time() - t0
     log(f"完成 ({elapsed:.1f}s) ok={stats['ok']} fail={stats['fail']} skip={stats['skip']} refresh={stats['refresh']}")
+    summary_path = write_download_summary(args, start_time, end_time, stats, elapsed, len(filtered))
+    log(f"下载汇总 JSON: {summary_path.resolve()}")
     log(f"PDF: {PDF_DIR.resolve()}")
     log(f"Log: {LOG_FILE.resolve()}")
 

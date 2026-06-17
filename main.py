@@ -14,9 +14,7 @@ from config import (
     DEFAULT_STORAGE_STATE,
     DEFAULT_TIMEOUT,
 )
-from exporter import export_results
-from pdf_download import run_download
-from pdf_verify import verify_pdfs
+from task_pipeline import tracked_download_pdf, tracked_extract_data, tracked_run_ocr
 from utils import exe_pause_if_frozen, log
 
 
@@ -45,10 +43,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true", help="输出详细日志")
     parser.add_argument("--username", default="", help="WMS 登录账号（HTTP 并发模式需要）")
     parser.add_argument("--password", default="", help="WMS 登录密码（HTTP 并发模式需要）")
-    parser.add_argument("--workers", type=int, default=5, help="HTTP 并发下载线程数，默认 5")
+    parser.add_argument("--workers", type=int, default=8, help="HTTP 并发下载线程数，默认 8")
+    parser.add_argument("--download-retries", type=int, default=5, help="单订单下载最大尝试次数，默认 5")
+    parser.add_argument("--retry-base-delay", type=float, default=0.8, help="下载/列表重试基础等待秒数，默认 0.8")
     parser.add_argument("--channel", default="", help="物流渠道筛选，例如 TikTok-CBT-US、Upload_Shipping_Label-Speedx")
     parser.add_argument("--metadata", default="", help="metadata.jsonl 路径，默认自动检测 output/download_label_metadata.jsonl")
-    parser.add_argument("--browser-mode", action="store_true", help="使用旧浏览器模式下载（需要 Playwright）")
+    parser.add_argument("--task-state", default="", help="任务状态 JSONL 路径；默认写入输出目录的 _intermediate")
+    parser.add_argument("--browser-mode", action="store_true", help="使用浏览器兼容模式下载（需要 Playwright）")
     parser.add_argument("--force", action="store_true", help="强制重新下载，不跳过下载日志里已有成功记录")
     return parser.parse_args()
 
@@ -81,7 +82,7 @@ def main() -> int:
         storage_state = resolve_storage_state_path(args.storage_state)
         args.storage_state = str(storage_state)
         output_dir = Path(args.output_dir).expanduser().resolve()
-        log("启动 PDF 面单一条龙流程")
+        log("启动 PDF 面单三步流水线")
         log(f"当前工作目录: {CURRENT_WORK_DIR}")
         log(f"EXE 所在目录/项目目录: {BASE_DIR}")
         log(f"storage_state 实际路径: {storage_state}")
@@ -89,19 +90,11 @@ def main() -> int:
         if args.platforms:
             log(f"平台参数已记录: {args.platforms}")
 
-        if args.strict_json:
-            input_dir = Path(args.input_dir).expanduser().resolve() if args.input_dir else Path(".").resolve()
-            download_log = Path(args.download_log).expanduser().resolve()
-            log(f"使用 strict-json 继续校验: {args.strict_json}")
-        else:
-            download_result = run_download(args)
-            input_dir = download_result.input_dir
-            download_log = download_result.download_log
-
-        results = verify_pdfs(args, input_dir=input_dir, download_log=download_log)
-        export_results(results, output_dir=output_dir, output_name=args.output_name)
+        download_manifest = tracked_download_pdf(args)
+        ocr_results = tracked_run_ocr(args, download_manifest)
+        extract_manifest = tracked_extract_data(args, ocr_results)
         log(f"识别输出目录: {output_dir}")
-        log("流程完成")
+        log(f"三步流水线完成: {extract_manifest}")
         return 0
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)

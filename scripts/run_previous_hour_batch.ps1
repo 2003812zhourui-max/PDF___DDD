@@ -2,7 +2,9 @@ param(
     [string]$RunAt = "",
     [string]$WhCodes = "US02",
     [string]$Statuses = "10,15,20,30",
-    [int]$Workers = 5,
+    [int]$Workers = 8,
+    [int]$DownloadRetries = 5,
+    [double]$RetryBaseDelay = 0.8,
     [int]$WindowMinute = 0,
     [int]$Limit = 0,
     [string]$Channel = "",
@@ -74,11 +76,15 @@ $argsList = @(
     "--wh-codes", $WhCodes,
     "--statuses", $Statuses,
     "--workers", [string]$Workers,
+    "--download-retries", [string]$DownloadRetries,
+    "--retry-base-delay", [string]$RetryBaseDelay,
     "--force",
     "--download-name", $runName,
     "--output-name", $outputName,
     "--output-dir", $outputDir
 )
+
+# 优化备注：这些参数用于服务器/飞书部署时按网络质量调优下载容错。
 
 if ($Limit -gt 0) {
     $argsList += @("--limit", [string]$Limit)

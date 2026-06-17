@@ -50,8 +50,10 @@ PDF_DIR = BASE_DIR / "pdf_downloads"
 LOG_FILE = LOG_DIR / "download_log.csv"
 AUTH_STATE_FILE = BASE_DIR / "wms_storage_state.json"
 PDF_VALIDATION_LOG_FILE = LOG_DIR / "pdf_validation_log.csv"
-LABEL_METADATA_LOG_FILE = BASE_DIR / "output" / "download_label_metadata.jsonl"
-LABEL_METADATA_SUMMARY_FILE = BASE_DIR / "output" / "download_label_metadata_summary.xlsx"
+LABEL_METADATA_LOG_FILE = Path(os.environ.get("PDF_DDD_METADATA_JSONL") or BASE_DIR / "output" / "download_label_metadata.jsonl")
+LABEL_METADATA_SUMMARY_FILE = Path(
+    os.environ.get("PDF_DDD_METADATA_SUMMARY") or BASE_DIR / "output" / "download_label_metadata_summary.xlsx"
+)
 TRACK_SIGN_JS_CACHE: str | None = None
 
 CSV_FIELDS = [
@@ -81,6 +83,7 @@ PDF_VALIDATION_FIELDS = [
     "error",
     "checkedAt",
 ]
+LABEL_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
 FORBIDDEN_FETCH_HEADERS = {
     "accept-encoding",
@@ -189,6 +192,17 @@ def get_header(headers: dict[str, str], name: str) -> str:
         if key.lower() == expected:
             return value
     return ""
+
+
+def limit_reached(count: int, limit: int) -> bool:
+    return limit > 0 and count >= limit
+
+
+def page_numbers(start: int, max_pages: int):
+    page_no = start
+    while max_pages <= 0 or page_no < start + max_pages:
+        yield page_no
+        page_no += 1
 
 
 def is_tracking_cookie(cookie: dict[str, Any]) -> bool:
@@ -1477,14 +1491,23 @@ def finalize_label_metadata_outputs() -> None:
         log(f"结构化面单信息汇总失败，继续原下载流程：{exc}")
 
 
-def make_pdf_path(order: dict[str, str], label_count: int, label_index: int) -> Path:
+def label_suffix(file_name: str) -> str:
+    suffix = Path(str(file_name or "")).suffix.lower()
+    return suffix if suffix in LABEL_SUFFIXES else ".pdf"
+
+
+def make_label_path(order: dict[str, str], label_count: int, label_index: int, file_name: str = "") -> Path:
     delivery_no = sanitize_filename_part(order["deliveryNo"])
     express_no = sanitize_filename_part(order["expressNo"])
     if label_count > 1:
-        filename = f"{delivery_no}_{express_no}_{label_index}.pdf"
+        filename = f"{delivery_no}_{express_no}_{label_index}{label_suffix(file_name)}"
     else:
-        filename = f"{delivery_no}_{express_no}.pdf"
+        filename = f"{delivery_no}_{express_no}{label_suffix(file_name)}"
     return PDF_DIR / filename
+
+
+def make_pdf_path(order: dict[str, str], label_count: int, label_index: int) -> Path:
+    return make_label_path(order, label_count, label_index)
 
 
 def download_pdf_with_requests(url: str, path: Path, session=None) -> None:
@@ -1735,7 +1758,7 @@ def download_order_records(
     total_seen = 0
 
     for record in records:
-        if total_seen >= total_limit:
+        if limit_reached(total_seen, total_limit):
             break
         total_seen += 1
 
@@ -1829,8 +1852,8 @@ def process_order_with_client(
         if not down_load_url:
             raise RuntimeError(f"下载链接接口未返回 data.downLoadUrl：{json.dumps(url_json, ensure_ascii=False)[:500]}")
 
-        pdf_path = make_pdf_path(detail_order, len(labels), index)
-        log(f"开始下载 PDF：{pdf_path.name}")
+        pdf_path = make_label_path(detail_order, len(labels), index, file_name)
+        log(f"开始下载面单：{pdf_path.name}")
         download_file(down_load_url, pdf_path)
         try:
             append_label_metadata(pdf_path, detail_order, detail_data, label, url_json, down_load_url)
@@ -1889,14 +1912,14 @@ def run_http_batch(
     log("使用 HTTP 轻量模式：不启动浏览器，直接复用已保存登录态。")
 
     for wh_code in wh_codes:
-        if total_seen >= args.total_limit:
+        if limit_reached(total_seen, args.total_limit):
             break
 
         session, auth_values = session_from_storage_state(args.storage_state, wh_code, args.auth_scheme)
         log(f"开始处理仓库：{wh_code}")
 
-        for page_no in range(args.current, args.current + args.max_pages):
-            if total_seen >= args.total_limit:
+        for page_no in page_numbers(args.current, args.max_pages):
+            if limit_reached(total_seen, args.total_limit):
                 log(f"已达到 total-limit={args.total_limit}，停止翻页。")
                 break
 
@@ -1920,7 +1943,7 @@ def run_http_batch(
                 break
 
             for record in records:
-                if total_seen >= args.total_limit:
+                if limit_reached(total_seen, args.total_limit):
                     break
                 total_seen += 1
 
@@ -1988,8 +2011,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="WMS 出库单面单批量下载")
     parser.add_argument("--current", type=int, default=1, help="起始页码，默认 1")
     parser.add_argument("--size", type=int, default=100, help="每页数量，默认 100")
-    parser.add_argument("--max-pages", type=int, default=10, help="最大页数，默认 10")
-    parser.add_argument("--total-limit", type=int, default=1000, help="最多处理订单数，默认 1000")
+    parser.add_argument("--max-pages", type=int, default=0, help="最大页数；0 表示不限，直到接口没有更多记录")
+    parser.add_argument("--total-limit", type=int, default=0, help="最多处理订单数；0 表示不限")
     parser.add_argument("--headless", action="store_true", help="启用无头模式；默认 headless=False")
     parser.add_argument("--date", default="", help="目标日期 YYYY-MM-DD；不传则默认昨天")
     parser.add_argument("--start-time", default="", help="创建时间起始；优先级高于 --date")
@@ -2022,7 +2045,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pdf-dir", default="", help="PDF save directory override")
     parser.add_argument("--log-file", default="", help="download_log.csv path override")
     parser.add_argument("--pdf-validation-log-file", default="", help="pdf_validation_log.csv path override")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if "--max-pages" not in sys.argv:
+        args.max_pages = 0
+    if "--total-limit" not in sys.argv:
+        args.total_limit = 0
+    return args
 
 
 def main() -> None:
@@ -2135,7 +2163,9 @@ def main() -> None:
             latest_records = latest_captured_list.get("records")
             latest_current = latest_captured_list.get("current")
             if allow_latest_bulk and isinstance(latest_records, list):
-                if len(latest_records) >= args.size or len(latest_records) >= args.total_limit:
+                if len(latest_records) >= args.size or (
+                    args.total_limit > 0 and len(latest_records) >= args.total_limit
+                ):
                     log(
                         f"未找到 current={page_no} 的页面响应；改用最新捕获列表 "
                         f"current={latest_current}, {len(latest_records)} 条。"
@@ -2200,15 +2230,15 @@ def main() -> None:
         total_seen = 0
 
         for wh_code in wh_codes:
-            if total_seen >= args.total_limit:
+            if limit_reached(total_seen, args.total_limit):
                 break
             log(f"开始处理仓库：{wh_code}")
             captured_list_records.clear()
             latest_captured_list["current"] = None
             latest_captured_list["records"] = None
 
-            for page_no in range(args.current, args.current + args.max_pages):
-                if total_seen >= args.total_limit:
+            for page_no in page_numbers(args.current, args.max_pages):
+                if limit_reached(total_seen, args.total_limit):
                     log(f"已达到 total-limit={args.total_limit}，停止翻页。")
                     break
 
@@ -2277,7 +2307,7 @@ def main() -> None:
                     break
 
                 for record in records:
-                    if total_seen >= args.total_limit:
+                    if limit_reached(total_seen, args.total_limit):
                         break
                     total_seen += 1
 

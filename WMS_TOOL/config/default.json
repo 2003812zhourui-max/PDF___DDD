@@ -1,0 +1,11 @@
+{
+  "warehouse": "US02",
+  "statuses": "10,15,20,30",
+  "workers": 8,
+  "download_retries": 5,
+  "retry_base_delay": 0.8,
+  "dpi": 200,
+  "max_pages": 1,
+  "timeout": 60,
+  "limit": 0
+}

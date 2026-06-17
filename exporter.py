@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import json
 import re
 import unicodedata
@@ -17,17 +18,20 @@ from config import BASE_DIR
 from utils import ensure_dir, log
 
 
-METADATA_JSONL = BASE_DIR / "output" / "download_label_metadata.jsonl"
+METADATA_JSONL = Path(os.environ.get("PDF_DDD_METADATA_JSONL") or BASE_DIR / "output" / "download_label_metadata.jsonl")
 UNKNOWN = "UNKNOWN"
 NORMAL_LABEL_TEMPLATE = "普通面单"
+SPECIAL_LABEL_TEMPLATES = {"0024", "CBT", "CBS"}
 BRIEF_SHEET_NAME = "简略版"
 RESULT_SHEET_NAME = "全部结果"
-BRIEF_COLUMNS = ("追踪号", "承运商", "最终状态", "条码是否一致")
+TEMPLATE_MISMATCH_SHEET_NAME = "下载不一致"
+BRIEF_COLUMNS = ("追踪号", "承运商", "面单类型", "内容识别类型", "下载与内容对比备注", "物流渠道名称")
 
 REVIEW_STATUSES = {
     "review_conflict",
     "review_unknown",
     "barcode_failed",
+    "image_ocr_detected",
     "source_only_low_confidence",
     "ocr_needed",
     "download_file_error",
@@ -42,6 +46,7 @@ STATUS_ZH = {
     "review_conflict": "需要复核：多来源结果冲突",
     "review_unknown": "需要复核：无法识别",
     "barcode_failed": "条码识别失败",
+    "image_ocr_detected": "图片识别到信息：需人工复核",
     "ocr_needed": "需要 OCR 深度识别",
     "download_file_error": "下载文件异常",
 }
@@ -65,6 +70,12 @@ BUSINESS_COLUMNS: list[tuple[str, str, str]] = [
     ("承运商", "carrier", "raw"),
     ("面单类型", "label_template", "raw"),
     ("模板细分", "template_subdivision", "raw"),
+    ("内容识别类型", "content_label_template", "raw"),
+    ("内容识别依据", "content_template_source", "raw"),
+    ("下载侧类型", "download_label_template", "raw"),
+    ("下载侧依据", "download_template_source", "raw"),
+    ("下载与内容是否一致", "template_compare_match", "yes_no"),
+    ("下载与内容对比备注", "template_compare_note", "raw"),
     ("识别依据", "recognition_basis", "raw"),
     ("识别置信度", "recognition_confidence", "raw"),
     ("备注", "template_note", "raw"),
@@ -96,6 +107,9 @@ BUSINESS_COLUMNS: list[tuple[str, str, str]] = [
 ]
 
 
+BUSINESS_COLUMNS.append(("物流渠道名称", "logistics_channel_name", "raw"))
+
+
 @dataclass
 class TemplateDecision:
     carrier: str = UNKNOWN
@@ -110,7 +124,7 @@ class TemplateDecision:
 
     @property
     def recognized(self) -> bool:
-        return self.label_template in {"0024", "CBT", "CBS"}
+        return self.label_template in SPECIAL_LABEL_TEMPLATES
 
 
 def normalize_text(value: object) -> str:
@@ -457,6 +471,85 @@ def make_template_decision(result: VerifyResult, metadata: dict[str, Any]) -> Te
     )
 
 
+def normal_template_decision(carrier: str = UNKNOWN, source: str = "默认规则") -> TemplateDecision:
+    return TemplateDecision(
+        carrier=carrier or UNKNOWN,
+        label_template=NORMAL_LABEL_TEMPLATE,
+        template_subdivision="",
+        source=source,
+        confidence="中",
+        note="未命中 0024/CBT/CBS，按普通面单处理",
+        need_review=False,
+    )
+
+
+def content_template_decision(result: VerifyResult, carrier_hint: str) -> TemplateDecision:
+    decision = template_from_verify_result(result, carrier_hint)
+    if decision:
+        return decision
+    return normal_template_decision(carrier_hint, "PDF内容识别")
+
+
+def normalize_template_code(value: object) -> str:
+    text = normalize_for_match(value)
+    if text in SPECIAL_LABEL_TEMPLATES:
+        return text
+    if text in {"", UNKNOWN}:
+        return ""
+    match = match_template_text(text, "下载metadata", "高")
+    return match.template_code if match.template_code in SPECIAL_LABEL_TEMPLATES else ""
+
+
+def metadata_recognition_template(metadata: dict[str, Any]) -> TemplateDecision | None:
+    for key in ("metadata_recognition", "metadata_pre_recognition"):
+        recognition = dict_or_empty(metadata.get(key))
+        template_code = normalize_template_code(recognition.get("template_code"))
+        if not template_code:
+            continue
+        sub_code = normalize_text(recognition.get("template_sub_code"))
+        if sub_code.upper() == UNKNOWN:
+            sub_code = ""
+        return TemplateDecision(
+            carrier=normalize_carrier(recognition.get("carrier")) or UNKNOWN,
+            label_template=template_code,
+            template_subdivision=template_subdivision(template_code, sub_code, normalize_text(recognition.get("template_key"))),
+            matched_text=normalize_text(recognition.get("template_key") or template_code),
+            matched_rule="下载metadata预识别",
+            source=normalize_text(recognition.get("source")) or key,
+            confidence=confidence_to_zh(recognition.get("confidence"), default="低"),
+            note=f"{key}.template_code={template_code}",
+            need_review=False,
+        )
+    return None
+
+
+def download_template_decision(metadata: dict[str, Any], carrier_hint: str) -> TemplateDecision | None:
+    if not metadata:
+        return None
+
+    decision = metadata_recognition_template(metadata)
+    if decision:
+        if decision.carrier == UNKNOWN:
+            decision.carrier = carrier_hint or UNKNOWN
+        return decision
+
+    for name, value in metadata_named_values(metadata):
+        decision = find_template(value, name, "高", carrier_hint)
+        if decision:
+            decision.note = f"{name} 命中 {decision.matched_text}"
+            return decision
+
+    return normal_template_decision(carrier_hint, "下载metadata")
+
+
+def compare_templates(content: TemplateDecision, download: TemplateDecision | None) -> tuple[bool | None, str]:
+    if download is None:
+        return None, "无下载侧metadata，无法对比"
+    if content.label_template == download.label_template:
+        return True, f"一致：下载侧={download.label_template}，内容识别={content.label_template}"
+    return False, f"不一致：下载侧={download.label_template}，内容识别={content.label_template}"
+
+
 def tracking_no(result: VerifyResult, metadata: dict[str, Any]) -> str:
     return first_non_empty(
         result.barcode_tracking,
@@ -479,8 +572,24 @@ def order_no(result: VerifyResult, metadata: dict[str, Any]) -> str:
     )
 
 
+def logistics_channel_name(result: VerifyResult, metadata: dict[str, Any]) -> str:
+    fields = dict_or_empty(metadata.get("source_fields"))
+    return first_non_empty(
+        fields.get("logisticsChannelName"),
+        metadata.get("channel_hint"),
+        getattr(result, "meta_channel", ""),
+    )
+
+
 def result_to_business_row(result: VerifyResult, metadata: dict[str, Any]) -> dict[str, object]:
-    decision = make_template_decision(result, metadata)
+    carrier = first_non_empty(
+        normalize_carrier(result.last_mile_carrier),
+        normalize_carrier(result.carrier),
+        carrier_from_metadata(metadata),
+    ) or UNKNOWN
+    decision = content_template_decision(result, carrier)
+    download_decision = download_template_decision(metadata, carrier)
+    compare_match, compare_note = compare_templates(decision, download_decision)
     row = asdict(result)
     row.update(
         {
@@ -489,6 +598,12 @@ def result_to_business_row(result: VerifyResult, metadata: dict[str, Any]) -> di
             "carrier": decision.carrier,
             "label_template": decision.label_template,
             "template_subdivision": decision.template_subdivision,
+            "content_label_template": decision.label_template,
+            "content_template_source": decision.source,
+            "download_label_template": download_decision.label_template if download_decision else "",
+            "download_template_source": download_decision.source if download_decision else "",
+            "template_compare_match": compare_match,
+            "template_compare_note": compare_note,
             "recognition_basis": decision.note,
             "recognition_confidence": decision.confidence,
             "template_note": decision.note,
@@ -496,7 +611,8 @@ def result_to_business_row(result: VerifyResult, metadata: dict[str, Any]) -> di
             "template_matched_rule": decision.matched_rule,
             "template_source": decision.source,
             "verify_status_zh": status_to_zh(result),
-            "need_review": bool(result.need_review or result.ocr_needed or decision.need_review),
+            "need_review": bool(result.need_review or result.ocr_needed or decision.need_review or compare_match is False),
+            "logistics_channel_name": logistics_channel_name(result, metadata),
         }
     )
     return row
@@ -504,6 +620,8 @@ def result_to_business_row(result: VerifyResult, metadata: dict[str, Any]) -> di
 
 def display_value(value: object, mode: str) -> object:
     if mode == "yes_no":
+        if value is None:
+            return ""
         return "是" if bool(value) else "否"
     if value is None:
         return ""
@@ -537,6 +655,13 @@ def yes_no_to_bool(value: object) -> bool:
     if text in {"否", "NO", "No", "no", "FALSE", "False", "false", "0"}:
         return False
     return bool(value)
+
+
+def brief_tracking_key(row: dict[str, object]) -> str:
+    tracking = normalize_text(row.get("追踪号") or row.get("tracking_no"))
+    if tracking:
+        return tracking.upper()
+    return "|".join(normalize_text(row.get(column)) for column in BRIEF_COLUMNS).upper()
 
 
 def business_row_key(row: dict[str, object]) -> str:
@@ -615,8 +740,10 @@ def make_brief_row(row: dict[str, object]) -> dict[str, object]:
     return {
         "追踪号": row.get("tracking_no", ""),
         "承运商": row.get("carrier", ""),
-        "最终状态": row.get("verify_status_zh", ""),
-        "条码是否一致": barcode_consistent_text(row),
+        "面单类型": row.get("label_template", ""),
+        "内容识别类型": row.get("content_label_template", ""),
+        "下载与内容对比备注": row.get("template_compare_note", ""),
+        "物流渠道名称": row.get("logistics_channel_name", ""),
     }
 
 
@@ -655,13 +782,21 @@ def read_existing_brief_rows(path: Path) -> list[dict[str, object]]:
 
 def merge_brief_rows(existing_rows: list[dict[str, object]], new_rows: list[dict[str, object]]) -> list[dict[str, object]]:
     merged: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for row in [*existing_rows, *new_rows]:
+    index_by_key: dict[str, int] = {}
+    for row in existing_rows:
         key = brief_tracking_key(row)
-        if key in seen:
+        if key in index_by_key:
             continue
-        seen.add(key)
+        index_by_key[key] = len(merged)
         merged.append({column: row.get(column, "") for column in BRIEF_COLUMNS})
+    for row in new_rows:
+        key = brief_tracking_key(row)
+        item = {column: row.get(column, "") for column in BRIEF_COLUMNS}
+        if key in index_by_key:
+            merged[index_by_key[key]] = item
+        else:
+            index_by_key[key] = len(merged)
+            merged.append(item)
     return merged
 
 
@@ -735,6 +870,9 @@ def append_summary_sheet(ws, rows: list[dict[str, object]]) -> None:
     total = len(rows)
     auto_pass = sum(1 for row in rows if row.get("verify_status") in TRACKING_STATUS_STRONG)
     need_review = sum(1 for row in rows if bool(row.get("need_review")))
+    comparable = sum(1 for row in rows if row.get("template_compare_match") is not None)
+    compare_matched = sum(1 for row in rows if row.get("template_compare_match") is True)
+    compare_mismatched = sum(1 for row in rows if row.get("template_compare_match") is False)
 
     ws.append(["统计项", "数值"])
     ws[1][0].font = Font(bold=True)
@@ -745,6 +883,9 @@ def append_summary_sheet(ws, rows: list[dict[str, object]]) -> None:
         ("需要复核数量", need_review),
         ("条码识别成功数量", sum(1 for row in rows if bool(row.get("barcode_success")))),
         ("OCR触发数量", sum(1 for row in rows if bool(row.get("ocr_needed")))),
+        ("下载与内容可对比数量", comparable),
+        ("下载与内容一致数量", compare_matched),
+        ("下载与内容不一致数量", compare_mismatched),
         ("0024数量", sum(1 for row in rows if row.get("label_template") == "0024")),
         ("CBT数量", sum(1 for row in rows if row.get("label_template") == "CBT")),
         ("CBS数量", sum(1 for row in rows if row.get("label_template") == "CBS")),
@@ -754,6 +895,8 @@ def append_summary_sheet(ws, rows: list[dict[str, object]]) -> None:
 
     append_counter_section(ws, "按承运商统计", ("承运商", "数量"), count_by(rows, "carrier"))
     append_counter_section(ws, "按面单类型统计", ("面单类型", "数量"), count_by(rows, "label_template"))
+    append_counter_section(ws, "按下载侧类型统计", ("下载侧类型", "数量"), count_by(rows, "download_label_template"))
+    append_counter_section(ws, "按下载与内容是否一致统计", ("是否一致", "数量"), count_by(rows, "template_compare_match"))
     append_counter_section(ws, "按模板细分统计", ("模板细分", "数量"), count_by(rows, "template_subdivision"))
 
     header_fill = PatternFill("solid", fgColor="D9EAF7")
@@ -788,6 +931,9 @@ def write_excel(results: list[VerifyResult], path: Path) -> None:
     ws_review = wb.create_sheet("异常复核")
     append_result_sheet(ws_review, [row for row in rows if bool(row.get("need_review"))])
 
+    ws_mismatch = wb.create_sheet(TEMPLATE_MISMATCH_SHEET_NAME)
+    append_result_sheet(ws_mismatch, [row for row in rows if row.get("template_compare_match") is False])
+
     ws_summary = wb.create_sheet("统计汇总")
     append_summary_sheet(ws_summary, rows)
 
@@ -806,10 +952,20 @@ def write_json(results: list[VerifyResult], path: Path) -> None:
     data: list[dict[str, object]] = []
     for result in results:
         metadata = metadata_for_result(result, index)
-        decision = make_template_decision(result, metadata)
+        carrier = first_non_empty(
+            normalize_carrier(result.last_mile_carrier),
+            normalize_carrier(result.carrier),
+            carrier_from_metadata(metadata),
+        ) or UNKNOWN
+        decision = content_template_decision(result, carrier)
+        download_decision = download_template_decision(metadata, carrier)
+        compare_match, compare_note = compare_templates(decision, download_decision)
         row = asdict(result)
         row["business_template"] = asdict(decision)
-        row["business_need_review"] = bool(result.need_review or result.ocr_needed or decision.need_review)
+        row["business_download_template"] = asdict(download_decision) if download_decision else {}
+        row["business_template_compare_match"] = compare_match
+        row["business_template_compare_note"] = compare_note
+        row["business_need_review"] = bool(result.need_review or result.ocr_needed or decision.need_review or compare_match is False)
         row["business_order_no"] = order_no(result, metadata)
         row["business_tracking_no"] = tracking_no(result, metadata)
         data.append(row)

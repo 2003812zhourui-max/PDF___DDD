@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -12,6 +13,12 @@ from utils import log
 
 
 DEFAULT_OUTPUT_NAME = "pdf_label_pipeline_result"
+
+
+def resolve_wms_credentials(args) -> tuple[str, str]:
+    username = getattr(args, "username", "") or os.environ.get("WMS_USERNAME", "")
+    password = getattr(args, "password", "") or os.environ.get("WMS_PASSWORD", "")
+    return username, password
 
 
 @dataclass
@@ -60,19 +67,18 @@ def resolve_download_log(args, target_dir: Path) -> Path:
 
 def run_download_http(args) -> DownloadResult:
     """使用 auto_download.py 的纯 HTTP 并发下载（无需浏览器，并发提速）"""
-    import os
-
     input_dir = Path(args.input_dir).expanduser().resolve() if args.input_dir else default_batch_dir(args).resolve()
     input_dir.mkdir(parents=True, exist_ok=True)
     DEFAULT_LOG_DIR.mkdir(parents=True, exist_ok=True)
     download_log = resolve_download_log(args, input_dir)
 
-    username = getattr(args, "username", "") or os.environ.get("WMS_USERNAME", "")
-    password = getattr(args, "password", "") or os.environ.get("WMS_PASSWORD", "")
+    username, password = resolve_wms_credentials(args)
     if not username or not password:
         raise RuntimeError("HTTP 并发模式需要账号密码，请设置 --username/--password 或环境变量 WMS_USERNAME/WMS_PASSWORD")
 
-    workers = getattr(args, "workers", 5)
+    workers = getattr(args, "workers", 8)
+    download_retries = getattr(args, "download_retries", 5)
+    retry_base_delay = getattr(args, "retry_base_delay", 0.8)
 
     downloader_args = [
         "auto_download.py",
@@ -81,6 +87,9 @@ def run_download_http(args) -> DownloadResult:
         "--pdf-dir", str(input_dir),
         "--log-file", str(download_log),
         "--workers", str(workers),
+        # 优化备注：下载重试参数透传到底层，后续上服务器或接飞书时可以按环境独立调优。
+        "--download-retries", str(download_retries),
+        "--retry-base-delay", str(retry_base_delay),
     ]
     if args.start_time and args.end_time:
         downloader_args.extend(["--start-time", args.start_time, "--end-time", args.end_time])
@@ -121,7 +130,7 @@ def run_download_http(args) -> DownloadResult:
 
 
 def run_download_browser(args) -> DownloadResult:
-    """使用原 Playwright 浏览器模式下载（兼容旧流程）"""
+    """使用 Playwright 浏览器兼容模式下载"""
     download_requested = has_download_params(args) or not args.input_dir
     input_dir = Path(args.input_dir).expanduser().resolve() if args.input_dir else default_batch_dir(args).resolve()
 
@@ -133,9 +142,16 @@ def run_download_browser(args) -> DownloadResult:
     DEFAULT_LOG_DIR.mkdir(parents=True, exist_ok=True)
     download_log = resolve_download_log(args, input_dir)
     validation_log = DEFAULT_LOG_DIR / f"{batch_name(args)}_pdf_validation_log.csv"
+    username, password = resolve_wms_credentials(args)
+    child_env = os.environ.copy()
+    if username:
+        child_env["WMS_USERNAME"] = username
+    if password:
+        child_env["WMS_PASSWORD"] = password
 
     downloader_args = [
         "batch_download_wms_pdfs.py",
+        "--browser-mode",
         "--pdf-dir",
         str(input_dir),
         "--log-file",
@@ -159,8 +175,8 @@ def run_download_browser(args) -> DownloadResult:
         downloader_args.extend(["--channel", args.channel])
     if getattr(args, "force", False):
         downloader_args.append("--force")
-    if args.debug:
-        downloader_args.append("--browser-mode")
+    if username and password:
+        downloader_args.extend(["--auto-login", "--username", username])
 
     log(f"开始下载 PDF 面单，保存目录: {input_dir}")
     log("下载参数: " + " ".join(downloader_args[1:]))
@@ -168,17 +184,31 @@ def run_download_browser(args) -> DownloadResult:
         import batch_download_wms_pdfs
 
         old_argv = sys.argv[:]
+        old_username = os.environ.get("WMS_USERNAME")
+        old_password = os.environ.get("WMS_PASSWORD")
         try:
+            if username:
+                os.environ["WMS_USERNAME"] = username
+            if password:
+                os.environ["WMS_PASSWORD"] = password
             sys.argv = downloader_args
             batch_download_wms_pdfs.main()
         finally:
             sys.argv = old_argv
+            if old_username is None:
+                os.environ.pop("WMS_USERNAME", None)
+            else:
+                os.environ["WMS_USERNAME"] = old_username
+            if old_password is None:
+                os.environ.pop("WMS_PASSWORD", None)
+            else:
+                os.environ["WMS_PASSWORD"] = old_password
     else:
         script = BASE_DIR / "batch_download_wms_pdfs.py"
         if not script.exists():
             raise FileNotFoundError(f"下载脚本不存在: {script}")
         command = [sys.executable, str(script), *downloader_args[1:]]
-        completed = subprocess.run(command, cwd=str(BASE_DIR), check=False)
+        completed = subprocess.run(command, cwd=str(BASE_DIR), env=child_env, check=False)
         if completed.returncode != 0:
             raise RuntimeError(f"PDF 下载失败，退出码: {completed.returncode}")
 
@@ -188,7 +218,7 @@ def run_download_browser(args) -> DownloadResult:
 
 
 def run_download(args) -> DownloadResult:
-    """自动选择下载模式：默认 HTTP 并发，传 --browser-mode 用旧浏览器模式"""
+    """自动选择下载模式：默认 HTTP 并发，传 --browser-mode 用浏览器兼容模式"""
     if not has_download_params(args) and args.input_dir:
         input_dir = Path(args.input_dir).expanduser().resolve()
         log(f"跳过下载，使用已有 PDF 目录: {input_dir}")

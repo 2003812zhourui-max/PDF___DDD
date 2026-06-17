@@ -60,7 +60,7 @@ python main.py --input-dir pdf_downloads --download-log logs\download_log.csv --
 python main.py --start-time "2026-06-10 00:00:00" --end-time "2026-06-10 23:59:59" --wh-codes US02 --statuses 15 --channel TikTok-CBT-US --workers 5 --output-name cbt_check
 ```
 
-使用旧浏览器模式下载：
+使用浏览器兼容模式下载：
 
 ```powershell
 python main.py --browser-mode --start-time "2026-06-10 00:00:00" --end-time "2026-06-10 23:59:59" --wh-codes US02
@@ -238,7 +238,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_window_batches_to_master.ps
 ## 主要文件
 
 - `main.py`：命令行入口，串起下载、识别、导出。
-- `pdf_download.py`：下载模式选择，默认 HTTP 并发，`--browser-mode` 走旧浏览器模式。
+- `pdf_download.py`：下载模式选择，默认 HTTP 并发，`--browser-mode` 走浏览器兼容模式。
 - `auto_download.py`：HTTP 并发下载实现，负责登录、查询订单、下载 PDF、写 metadata。
 - `barcode_verify_tracking.py`：核心条码识别、承运商识别、面单类型识别。
 - `pdf_verify.py`：批量处理 PDF，并读取下载日志、metadata 丰富结果。

@@ -26,7 +26,7 @@ python -m playwright install chromium
 
 常见文件用途：
 
-- `wms_storage_state.json`：Playwright 浏览器登录态，旧浏览器模式可能会用。
+- `wms_storage_state.json`：Playwright 浏览器登录态，浏览器兼容模式可能会用。
 - `.wms_token_cache.json`：HTTP 下载 token 缓存，如果存在可以减少重新登录。
 - `.env`：本地账号密码环境变量记录，如果你自己创建了才会有。
 - `logs/download_log.csv`：下载日志，用于本地 PDF 和 WMS 单号对照。
@@ -68,7 +68,7 @@ python main.py --start-time "2026-06-10 00:00:00" --end-time "2026-06-10 23:59:5
 
 下载逻辑在 auto_download.py 和 pdf_download.py：
 - 默认 HTTP 并发。
-- --browser-mode 才使用旧浏览器下载。
+- --browser-mode 才使用浏览器兼容模式下载。
 - WMS_USERNAME/WMS_PASSWORD 或 --username/--password 提供账号密码。
 ```
 

@@ -11,7 +11,7 @@ from openpyxl.utils import get_column_letter
 
 BRIEF_SHEET_NAME = "简略版"
 MAIN_SHEET_NAME = "全部结果"
-BRIEF_COLUMNS = ("追踪号", "承运商", "最终状态", "条码是否一致")
+BRIEF_COLUMNS = ("追踪号", "承运商", "最终状态", "条码是否一致", "是否人工复核", "物流渠道名称")
 
 
 def text(value: Any) -> str:
@@ -64,6 +64,8 @@ def brief_from_main(row: dict[str, Any]) -> dict[str, Any]:
         "承运商": row.get("承运商", ""),
         "最终状态": row.get("最终状态", ""),
         "条码是否一致": barcode_consistent(row),
+        "是否人工复核": row.get("是否人工复核", ""),
+        "物流渠道名称": row.get("物流渠道名称", "") or row.get("metadata渠道", ""),
     }
 
 
